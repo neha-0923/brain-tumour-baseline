@@ -1,0 +1,4 @@
+data:
+  raw_data_dir: "C:/BraTS_data/raw/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData"
+  expected_modalities: ["t1c", "t1n", "t2f", "t2w"]
+  expected_seg_suffix: "seg"
