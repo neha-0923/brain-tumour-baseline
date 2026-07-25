@@ -10,6 +10,7 @@ from monai.transforms import (
     NormalizeIntensityd,
     ConcatItemsd,
     CropForegroundd,
+    SpatialPadd,
     RandCropByPosNegLabeld,
     RandFlipd,
     RandRotate90d,
@@ -41,12 +42,17 @@ def get_base_transforms(modalities, seg_key="seg"):
 
 def get_train_transforms(modalities, seg_key="seg", patch_size=(128, 128, 128)):
     """
-    Training-only pipeline: base preprocessing + random positive/negative
-    patch cropping to a fixed size + spatial/intensity augmentation.
+    Training-only pipeline: base preprocessing + guaranteed minimum-size
+    padding + random positive/negative patch cropping + augmentation.
     """
-    base = get_base_transforms(modalities, seg_key).transforms  # reuse as a list
+    base = get_base_transforms(modalities, seg_key).transforms
 
     augment = [
+        SpatialPadd(
+            keys=["image", seg_key],
+            spatial_size=patch_size,
+            mode="constant",
+        ),
         RandCropByPosNegLabeld(
             keys=["image", seg_key],
             label_key=seg_key,
