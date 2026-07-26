@@ -5,6 +5,7 @@ logs progress, and saves the best checkpoint.
 """
 import yaml
 import torch
+from tqdm import tqdm
 from pathlib import Path
 from torch.utils.data import DataLoader
 from monai.inferers import sliding_window_inference
@@ -42,11 +43,11 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=2, collate_fn=list_data_collate,
+        num_workers=0, collate_fn=list_data_collate,
     )
     # batch_size=1 for validation: full volumes vary in size across patients,
     # so they cannot be stacked into a batch > 1 without padding complications
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
 
     model = get_baseline_unet(in_channels=4, out_channels=4).to(device)
     loss_fn = get_baseline_loss()
@@ -66,7 +67,7 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
         # ---- Training phase ----
         model.train()
         epoch_train_loss = 0.0
-        for batch in train_loader:
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} training")):
             images = batch["image"].to(device)
             labels = batch["seg"].to(device)
 
