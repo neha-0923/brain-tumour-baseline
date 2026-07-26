@@ -9,10 +9,6 @@ from pathlib import Path
 from monai.data import CacheDataset
 
 def build_data_list(raw_data_dir, split_file, split_name, modalities, seg_suffix):
-    """
-    Builds a list of {modality: filepath, ...} dicts for the given split —
-    the raw input format CacheDataset expects, before any transform runs.
-    """
     raw_data_dir = Path(raw_data_dir)
     with open(split_file, "r") as f:
         split = json.load(f)

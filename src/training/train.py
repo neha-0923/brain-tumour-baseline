@@ -1,9 +1,12 @@
 """
-Full baseline U-Net training loop: trains on BraTS training split,
-validates each epoch using sliding window inference + Dice metric,
-logs progress, and saves the best checkpoint.
+Full baseline U-Net training loop with:
+- CacheDataset (cache_rate=0.5) for speed
+- persistent_workers to avoid Colab notebook hangs
+- checkpoint + history saved to Google Drive every epoch (survives disconnects)
+- resume-from-checkpoint support
 """
 import yaml
+import json
 import torch
 from tqdm import tqdm
 from pathlib import Path
@@ -20,7 +23,8 @@ from src.training.losses import get_baseline_loss
 from src.training.optimiser import get_optimizer_and_scheduler
 
 
-def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, batch_size=2):
+def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, batch_size=2,
+                    drive_output_dir="/content/drive/MyDrive/brain_tumour_baseline_outputs"):
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -32,7 +36,14 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
     raw_dir = config["data"]["raw_data_dir"]
     split_file = "outputs/splits/train_val_test_split.json"
 
-    print("Building training CacheDataset (this takes a while on first run — "
+    # ---- Drive-backed output paths (survive Colab disconnects) ----
+    checkpoint_dir = Path(drive_output_dir) / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    history_path = Path(drive_output_dir) / "training_history.json"
+    last_checkpoint_path = checkpoint_dir / "last_checkpoint.pth"
+    best_checkpoint_path = checkpoint_dir / "best_model.pth"
+
+    print("Building training CacheDataset (first run takes a while - "
           "caching 50% of patients' preprocessed volumes in RAM)...")
     train_ds = build_cache_dataset(
         raw_dir, split_file, "train", modalities, seg_suffix,
@@ -51,8 +62,6 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
         num_workers=2, collate_fn=list_data_collate,
         persistent_workers=True, pin_memory=True,
     )
-    # batch_size=1 for validation: full volumes vary in size across patients,
-    # so they cannot be stacked into a batch > 1 without padding complications
     val_loader = DataLoader(
         val_ds, batch_size=1, shuffle=False, num_workers=2,
         persistent_workers=True, pin_memory=True,
@@ -66,13 +75,27 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
     post_pred = AsDiscrete(argmax=True, to_onehot=4)
     post_label = AsDiscrete(to_onehot=4)
 
+    start_epoch = 0
     best_val_dice = -1.0
     history = {"train_loss": [], "val_loss": [], "val_dice": []}
 
-    checkpoint_dir = Path("outputs/checkpoints")
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # ---- Resume from checkpoint if one exists on Drive ----
+    if last_checkpoint_path.exists():
+        print(f"\nFound existing checkpoint at {last_checkpoint_path} — resuming.")
+        checkpoint = torch.load(last_checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        best_val_dice = checkpoint["best_val_dice"]
+        if history_path.exists():
+            with open(history_path) as f:
+                history = json.load(f)
+        print(f"Resuming from epoch {start_epoch}, best_val_dice so far: {best_val_dice:.4f}\n")
+    else:
+        print("\nNo existing checkpoint found — starting fresh from epoch 0.\n")
 
-    for epoch in range(max_epochs):
+    for epoch in range(start_epoch, max_epochs):
         # ---- Training phase ----
         model.train()
         epoch_train_loss = 0.0
@@ -96,12 +119,10 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
         epoch_val_loss = 0.0
         dice_metric.reset()
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in tqdm(val_loader, desc=f"Epoch {epoch+1} validation"):
                 images = batch["image"].to(device)
                 labels = batch["seg"].to(device)
 
-                # Full volumes are too large/variable for a direct forward pass;
-                # sliding_window_inference tiles 128^3 patches across the volume
                 outputs = sliding_window_inference(
                     images, roi_size=(128, 128, 128), sw_batch_size=1, predictor=model,
                 )
@@ -124,9 +145,23 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
               f"val_loss={epoch_val_loss:.4f} | "
               f"val_dice={epoch_val_dice:.4f}")
 
+        # ---- Save history to Drive every epoch ----
+        with open(history_path, "w") as f:
+            json.dump(history, f, indent=2)
+
+        # ---- Save "last checkpoint" every epoch (for resuming) ----
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_val_dice": best_val_dice,
+        }, last_checkpoint_path)
+
+        # ---- Save "best model" separately when val_dice improves ----
         if epoch_val_dice > best_val_dice:
             best_val_dice = epoch_val_dice
-            torch.save(model.state_dict(), checkpoint_dir / "best_model.pth")
+            torch.save(model.state_dict(), best_checkpoint_path)
             print(f"  -> New best model saved (val_dice={best_val_dice:.4f})")
 
     return history
