@@ -14,7 +14,7 @@ from monai.transforms import AsDiscrete
 from monai.data import list_data_collate
 
 from src.preprocessing.transforms import get_train_transforms, get_val_transforms
-from src.datasets.brats_dataset import BraTSDataset
+from src.datasets.brats_dataset import build_cache_dataset
 from src.models.unet import get_baseline_unet
 from src.training.losses import get_baseline_loss
 from src.training.optimiser import get_optimizer_and_scheduler
@@ -32,22 +32,31 @@ def train_baseline(config_path="configs/baseline_config.yaml", max_epochs=100, b
     raw_dir = config["data"]["raw_data_dir"]
     split_file = "outputs/splits/train_val_test_split.json"
 
-    train_ds = BraTSDataset(
+    print("Building training CacheDataset (this takes a while on first run — "
+          "caching 50% of patients' preprocessed volumes in RAM)...")
+    train_ds = build_cache_dataset(
         raw_dir, split_file, "train", modalities, seg_suffix,
         get_train_transforms(modalities, patch_size=(128, 128, 128)),
+        cache_rate=0.5, num_workers=2,
     )
-    val_ds = BraTSDataset(
+    print("Building validation CacheDataset...")
+    val_ds = build_cache_dataset(
         raw_dir, split_file, "val", modalities, seg_suffix,
         get_val_transforms(modalities),
+        cache_rate=0.5, num_workers=2,
     )
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=0, collate_fn=list_data_collate,
+        num_workers=2, collate_fn=list_data_collate,
+        persistent_workers=True, pin_memory=True,
     )
     # batch_size=1 for validation: full volumes vary in size across patients,
     # so they cannot be stacked into a batch > 1 without padding complications
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
+    val_loader = DataLoader(
+        val_ds, batch_size=1, shuffle=False, num_workers=2,
+        persistent_workers=True, pin_memory=True,
+    )
 
     model = get_baseline_unet(in_channels=4, out_channels=4).to(device)
     loss_fn = get_baseline_loss()
